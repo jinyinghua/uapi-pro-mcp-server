@@ -1,5 +1,6 @@
 import { buildImageJobFileUrl, getPublicBaseUrl } from '@/lib/app-url';
 import { handleImageViaConversation } from '@/lib/chatgpt-image';
+import { generateImageWithOpenAiProviders } from '@/lib/openai-image-provider';
 import {
   acquireJobLock,
   buildImageRequestFingerprint,
@@ -37,7 +38,7 @@ export async function ensureImageJobStarted(job: ImageJobRecord) {
   try {
     const latest = await patchJob(job.id, { status: 'running', error: undefined });
     const active = latest || job;
-    const result = await handleImageViaConversation({
+    const imageRequest = {
       prompt: active.request.prompt,
       model: active.request.model,
       n: active.request.n || 1,
@@ -46,11 +47,25 @@ export async function ensureImageJobStarted(job: ImageJobRecord) {
       background: active.request.background || 'auto',
       responseFormat: active.request.responseFormat || 'url',
       inputImages: active.request.inputImages,
-      persistPrefix: `image-jobs/${active.id}`,
-    });
+    };
+
+    // A configured OpenAI-compatible provider pool owns the matching model. When
+    // no pool provider matches, retain the existing ChatGPT conversation backend.
+    const providerResult = await generateImageWithOpenAiProviders(imageRequest, active.id);
+    const result = providerResult
+      ? {
+          created: Math.floor(Date.now() / 1000),
+          data: providerResult.data,
+          text: providerResult.text,
+        }
+      : await handleImageViaConversation({
+          ...imageRequest,
+          persistPrefix: `image-jobs/${active.id}`,
+        });
 
     const assets: ImageJobAsset[] = result.data.map((item) => {
       if (item.url?.startsWith('data:')) return dataUriToAsset(item.url, item.revised_prompt);
+      if (item.b64_json) return { b64Json: item.b64_json, revisedPrompt: item.revised_prompt };
       return { originUrl: item.url, b64Json: item.b64_json, revisedPrompt: item.revised_prompt };
     });
 
